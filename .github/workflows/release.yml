@@ -41,14 +41,15 @@ jobs:
           fi
 
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500d26b81e1871e1c692b08d38304ce # v6 / audited SHA
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af80 # refs/tags/v6.1.0
         with:
           ref: ${{ inputs.branch }}
           fetch-depth: 0
           persist-credentials: true
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # refs/tags/v1
+          #uses: dtolnay/rust-toolchain@master
         with:
           toolchain: stable
 
@@ -163,7 +164,7 @@ jobs:
 
     steps:
       - name: Checkout exact tagged commit
-        uses: actions/checkout@de0fac2e4500d26b81e1871e1c692b08d38304ce # v6 / audited SHA
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # refs/tags/v6.1.0
         with:
           ref: ${{ needs.bump-and-tag.outputs.release_tag }}
           fetch-depth: 1
@@ -181,7 +182,8 @@ jobs:
           fi
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # refs/tags/v1
+          #uses: dtolnay/rust-toolchain@master
         with:
           toolchain: stable
 
@@ -223,7 +225,7 @@ jobs:
           )
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@cf430e06a00e14518412f6215bd6296b4d3e3f92 # v7 / audited SHA
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # refs/tags/v7.0.2
         with:
           name: release-assets-${{ needs.bump-and-tag.outputs.release_tag }}
           path: dist/
@@ -242,13 +244,13 @@ jobs:
 
     steps:
       - name: Download build artifacts
-        uses: actions/download-artifact@3e5f45b24a9bc68ca56e14b1b4c01af65ce258bb # v8 / audited SHA
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # refs/tags/v8.0.2
         with:
           name: release-assets-${{ needs.bump-and-tag.outputs.release_tag }}
           path: dist/
 
       - name: Create GitHub Release with version file and Cargo.lock
-        uses: softprops/action-gh-release@8a0cd65... # v3 / audited SHA
+        uses: softprops/action-gh-release@28ab305d0ffa26d60ec4bd614126329e26c7a0ec # refs/tags/v3.0.4
         with:
           tag_name: ${{ needs.bump-and-tag.outputs.release_tag }}
           target_commitish: ${{ needs.bump-and-tag.outputs.tagged_sha }}
