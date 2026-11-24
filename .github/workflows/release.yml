@@ -1,0 +1,262 @@
+name: Release (Minor Bump)
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Target release branch"
+        required: true
+        default: "main"
+        type: string
+
+# Default-deny at workflow level; grant minimum scope per job
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  # Avoid accidental network/credential leakage from git/cargo
+  GIT_TERMINAL_PROMPT: "0"
+
+jobs:
+  bump-and-tag:
+    name: Bump Minor Version & Tag
+    runs-on: ubuntu-24.04
+    # Optional: configure a 'release' environment in GitHub with required reviewers
+    environment: release
+    permissions:
+      contents: write
+    outputs:
+      release_version: ${{ steps.bump.outputs.version }}
+      release_tag: ${{ steps.bump.outputs.tag }}
+      tagged_sha: ${{ steps.push_tag.outputs.sha }}
+
+    steps:
+      - name: Harden runner & verify branch input
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ inputs.branch }}" != "main" ]]; then
+            echo "Refusing release from unexpected branch: ${{ inputs.branch }}" >&2
+            exit 1
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500d26b81e1871e1c692b08d38304ce # v6 / audited SHA
+        with:
+          ref: ${{ inputs.branch }}
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - name: Bump minor version in Cargo.toml and sync Cargo.lock
+        id: bump
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import pathlib, re, sys
+
+          cargo_path = pathlib.Path("Cargo.toml")
+          content = cargo_path.read_text(encoding="utf-8")
+
+          # Match [package] version = "X.Y.Z" (handles optional pre-release/build suffix cleanly)
+          pkg_match = re.search(r'(?ms)^\[package\]\s.*?^version\s*=\s*"(\d+)\.(\d+)\.(\d+)(?:[-+][^"]*)?"', content)
+          if not pkg_match:
+              sys.exit("Could not locate [package] version in Cargo.toml")
+
+          major = int(pkg_match.group(1))
+          minor = int(pkg_match.group(2)) + 1
+          patch = 0
+          new_version = f"{major}.{minor}.{patch}"
+
+          # Replace only the first version = "..." inside [package]
+          start, end = pkg_match.span(0)
+          block = pkg_match.group(0)
+          updated_block, count = re.subn(
+              r'(?m)^(version\s*=\s*")[^"]+(")',
+              rf'\g<1>{new_version}\g<2>',
+              block,
+              count=1,
+          )
+          if count != 1:
+              sys.exit("Failed to update version line in [package]")
+
+          cargo_path.write_text(content[:start] + updated_block + content[end:], encoding="utf-8")
+          print(f"Bumped version to {new_version}")
+          PY
+
+          NEW_VERSION="$(python3 - <<'PY'
+          import pathlib, tomllib
+          data = tomllib.loads(pathlib.Path("Cargo.toml").read_text(encoding="utf-8"))
+          print(data["package"]["version"])
+          PY
+          )"
+
+          if [[ ! "$NEW_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid bumped version format: $NEW_VERSION" >&2
+            exit 1
+          fi
+
+          TAG="v${NEW_VERSION}"
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "Tag ${TAG} already exists!" >&2
+            exit 1
+          fi
+
+          # Update Cargo.lock for the workspace package without touching unrelated crates
+          PKG_NAME="$(python3 - <<'PY'
+          import pathlib, tomllib
+          data = tomllib.loads(pathlib.Path("Cargo.toml").read_text(encoding="utf-8"))
+          print(data["package"]["name"])
+          PY
+          )"
+          cargo update --workspace --offline -p "$PKG_NAME" 2>/dev/null || cargo generate-lockfile
+
+          if [[ ! -f "Cargo.lock" ]]; then
+            echo "Cargo.lock is missing after lockfile update" >&2
+            exit 1
+          fi
+
+          echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Commit version bump and push branch + tag
+        id: push_tag
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="${{ steps.bump.outputs.version }}"
+          TAG="${{ steps.bump.outputs.tag }}"
+          BRANCH="${{ inputs.branch }}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add Cargo.toml Cargo.lock
+          git diff --cached --quiet && {
+            echo "No changes staged for release commit" >&2
+            exit 1
+          }
+
+          git commit -m "chore(release): bump version to ${VERSION}"
+          git tag -a "$TAG" -m "Release ${TAG}"
+
+          # Push branch first, then the annotated tag
+          git push origin "HEAD:refs/heads/${BRANCH}"
+          git push origin "refs/tags/${TAG}"
+
+          TAGGED_SHA="$(git rev-parse "refs/tags/${TAG}^{commit}")"
+          echo "sha=$TAGGED_SHA" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build Release Binary & Manifest
+    needs: bump-and-tag
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout exact tagged commit
+        uses: actions/checkout@de0fac2e4500d26b81e1871e1c692b08d38304ce # v6 / audited SHA
+        with:
+          ref: ${{ needs.bump-and-tag.outputs.release_tag }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify checked-out SHA matches tagged commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          HEAD_SHA="$(git rev-parse HEAD)"
+          EXPECTED_SHA="${{ needs.bump-and-tag.outputs.tagged_sha }}"
+          if [[ "$HEAD_SHA" != "$EXPECTED_SHA" ]]; then
+            echo "SHA mismatch: expected $EXPECTED_SHA, got $HEAD_SHA" >&2
+            exit 1
+          fi
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - name: Build locked release binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release --locked
+
+      - name: Package version metadata, Cargo.lock, and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          VERSION="${{ needs.bump-and-tag.outputs.release_version }}"
+          TAG="${{ needs.bump-and-tag.outputs.release_tag }}"
+          SHA="${{ needs.bump-and-tag.outputs.tagged_sha }}"
+
+          # Save release version metadata
+          cat > dist/release-version.txt <<EOF
+          version=${VERSION}
+          tag=${TAG}
+          commit=${SHA}
+          built_at_utc=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          EOF
+
+          # Save exact Cargo.lock used for this release
+          cp Cargo.lock dist/Cargo.lock
+
+          # Copy compiled binary with versioned & canonical names
+          cp target/release/rss-bsky-bot "dist/rss-bsky-bot-${TAG}-x86_64-unknown-linux-gnu"
+          cp target/release/rss-bsky-bot dist/rss-bsky-bot
+
+          # Generate SHA-256 checksums for all release assets
+          (
+            cd dist
+            sha256sum * > SHA256SUMS.txt
+          )
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@cf430e06a00e14518412f6215bd6296b4d3e3f92 # v7 / audited SHA
+        with:
+          name: release-assets-${{ needs.bump-and-tag.outputs.release_tag }}
+          path: dist/
+          retention-days: 7
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs:
+      - bump-and-tag
+      - build
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@3e5f45b24a9bc68ca56e14b1b4c01af65ce258bb # v8 / audited SHA
+        with:
+          name: release-assets-${{ needs.bump-and-tag.outputs.release_tag }}
+          path: dist/
+
+      - name: Create GitHub Release with version file and Cargo.lock
+        uses: softprops/action-gh-release@8a0cd65... # v3 / audited SHA
+        with:
+          tag_name: ${{ needs.bump-and-tag.outputs.release_tag }}
+          target_commitish: ${{ needs.bump-and-tag.outputs.tagged_sha }}
+          name: ${{ needs.bump-and-tag.outputs.release_tag }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/release-version.txt
+            dist/Cargo.lock
+            dist/SHA256SUMS.txt
+            dist/rss-bsky-bot-${{ needs.bump-and-tag.outputs.release_tag }}-x86_64-unknown-linux-gnu
