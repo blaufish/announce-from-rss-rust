@@ -274,8 +274,25 @@ async fn main() -> Result<()> {
         return Ok(());
     };
 
-    let Some(password) = bsky_cfg.secrets.as_ref().and_then(|s| s.password.as_deref()) else {
+    let Some(password_variable_name) = bsky_cfg.secrets.as_ref().and_then(|s| s.password.as_deref()) else {
         error!("Error retrieving: bsky.secrets.password");
+        return Ok(());
+    };
+
+    let password = std::env::var(password_variable_name)
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            bsky_cfg
+                .secrets
+                .as_ref()
+                .and_then(|s| s.password.as_deref())
+                .filter(|s| !s.starts_with("${"))
+                .map(str::to_owned)
+        });
+
+    let Some(password) = password else {
+        error!("Error retrieving Bluesky password from environment");
         return Ok(());
     };
 
