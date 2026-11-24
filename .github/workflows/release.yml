@@ -6,7 +6,7 @@ on:
       branch:
         description: "Target release branch"
         required: true
-        default: "main"
+        default: "master"
         type: string
 
 # Default-deny at workflow level; grant minimum scope per job
